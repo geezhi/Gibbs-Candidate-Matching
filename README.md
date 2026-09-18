@@ -12,6 +12,10 @@
 
 ## 🎯 Overview
 
+<div align="center">
+  <img src="assets/motivation.png" width="800px">
+</div>
+
 > **TL;DR**: Gibbs Candidate Matching rolls out **multiple candidate samples** with the student model, scores every candidate with a reward model, **selects the top-1 candidate**, and applies **distribution matching distillation (DMD) on the selected candidate only**. The reward is used purely as a selection criterion — it never enters the gradient.
 
 ```
