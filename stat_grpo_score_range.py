@@ -6,7 +6,7 @@ No training is performed; only the first forward pass is executed.
 Usage:
     torchrun --nnodes=1 --nproc_per_node=8 --rdzv_id=9999 --rdzv_backend=c10d \
         --rdzv_endpoint=$MASTER_PORT stat_grpo_score_range.py \
-        --config_path configs/reward_forcing.yaml \
+        --config_path configs/gibbs_candidate_matching.yaml \
         --num_prompts 10
 """
 
@@ -26,7 +26,7 @@ from model import ReDMD
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", type=str, default="configs/reward_forcing.yaml")
+    parser.add_argument("--config_path", type=str, default="configs/gibbs_candidate_matching.yaml")
     parser.add_argument("--num_prompts", type=int, default=10,
                         help="Number of prompts to evaluate")
     parser.add_argument("--num_rollouts", type=int, default=None,

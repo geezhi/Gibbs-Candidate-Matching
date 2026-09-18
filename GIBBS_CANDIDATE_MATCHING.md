@@ -1,8 +1,11 @@
-# Best-of-N Training (Multi-Rollout + Top-1)
+# Gibbs Candidate Matching
 
-用学生模型做**多个 rollout**，用奖励模型打分，**只取奖励最高的那一个（top-1）** 计算标准 DMD loss。
+用学生模型生成**多个候选（candidate）rollout**，用奖励模型为每个候选打分，**选出 top-1 候选**，
+只对被选中的候选计算标准 distribution matching (DMD) loss。
 
-奖励值本身**不进入梯度**，只作为筛选依据。这是 best-of-N / rejection-sampling 微调，**不是 GRPO**。
+奖励定义了候选集上的 Gibbs 分布，取 top-1 即取该分布的 mode（低温极限）。
+奖励值本身**不进入梯度**，只作为筛选依据——这是 candidate matching，**不是 GRPO**。
+机制上等价于 best-of-N / rejection-sampling 微调。
 
 ---
 
@@ -27,7 +30,7 @@ condition blocks ────>├─ rollout 2 ─┤─> reward model 打分 �
 
 ## 与 GRPO 的区别
 
-| | Best-of-N（本实现） | GRPO |
+| | Gibbs Candidate Matching（本实现） | GRPO |
 |---|---|---|
 | reward 用途 | **只用于选择** winner | 归一化成 advantage，**加权进 loss** |
 | 非选中 rollout | 无 loss 项，不贡献梯度 | 贡献负 advantage 的梯度 |
@@ -35,7 +38,7 @@ condition blocks ────>├─ rollout 2 ─┤─> reward model 打分 �
 | 需要 reward 的绝对值 | 不需要（只需排序） | 需要（advantage 用均值/标准差归一化） |
 
 本仓库原先存在一条 GRPO advantage 加权分支（`compute_grpo_loss` + `grpo_weight`），
-在默认配置下 `grpo_weight: 0` 即不生效；现已整体移除，只保留 best-of-N 主线。
+在默认配置下 `grpo_weight: 0` 即不生效；现已整体移除，只保留 Gibbs Candidate Matching 主线。
 
 ---
 
@@ -67,7 +70,7 @@ else:
 **反向阶段：只有 top-1 贡献梯度。**
 
 其余 rollout 的计算图在 forward 期间仍占显存，但因为不在 loss 路径上，`backward()` 不会遍历它们。
-因此**显存峰值随 `num_rollouts` 近似线性增长**——这是 best-of-N 的主要代价。
+因此**显存峰值随 `num_rollouts` 近似线性增长**——这是多候选机制的主要代价。
 
 另外，每个 rollout 只在**一个随机选中的 exit step** 反传梯度（随机截断 BPTT），
 并非整条去噪轨迹都反传。
@@ -78,7 +81,7 @@ else:
 
 | 文件 | 内容 |
 |---|---|
-| **`model/best_of_n.py`** | **best-of-N 全部逻辑**（`BestOfNMixin`）← 核心，独立可读 |
+| **`model/best_of_n.py`** | **Gibbs Candidate Matching 全部逻辑**（`BestOfNMixin`）← 核心，独立可读 |
 | `model/re_dmd.py` | `class ReDMD(BestOfNMixin, RewardForcingModel)`，提供标准 DMD loss |
 | `model/base.py` | 模型基类（`_run_generator`、模型初始化） |
 | `pipeline/reward_forcing_training.py` | `inference_with_trajectory_multi_rollout`：自回归多 rollout 生成 |
@@ -104,7 +107,7 @@ trainer/rewarded_distillation.py
 ## 配置
 
 ```yaml
-use_multi_rollout: True   # 开启 best-of-N；False 则走普通 generator_loss（单 rollout）
+use_multi_rollout: True   # 开启多候选 top-1 选择；False 则走普通 generator_loss（单 rollout）
 num_rollouts: 4           # 每个 prompt 的 rollout 数
 ```
 

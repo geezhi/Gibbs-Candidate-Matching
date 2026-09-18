@@ -41,7 +41,7 @@ parser.add_argument("--reward_forcing_checkpoint", type=str, required=True,
                     help="Path to reward-forcing checkpoint (.pt)")
 parser.add_argument("--ours_checkpoint", type=str, required=True,
                     help="Path to 'ours' model checkpoint (.pt)")
-parser.add_argument("--config_path", type=str, default="configs/reward_forcing_copy.yaml",
+parser.add_argument("--config_path", type=str, default="configs/gibbs_candidate_matching_copy.yaml",
                     help="Config file (used for denoising_step_list, model_kwargs, etc.)")
 parser.add_argument("--prompt", type=str, required=True,
                     help="Text prompt for generation")

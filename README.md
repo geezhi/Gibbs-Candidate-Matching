@@ -1,63 +1,40 @@
 <div align="center">
 
-<div align="center">
-  
-<h1>Reward Forcing: <br> Efficient Streaming Video Generation with <br> Rewarded Distribution Matching Distillation</h1>
+<h1>Gibbs Candidate Matching</h1>
 
-<div>
-  <a href="#" target="_blank">Yunhong Lu</a><sup>1,2</sup>,
-  <a href="https://zengyh1900.github.io/" target="_blank">Yanhong Zeng</a><sup>2</sup>,
-  <a href="#" target="_blank">Haobo Li</a><sup>2,4</sup>,
-  <a href="https://ken-ouyang.github.io/" target="_blank">Hao Ouyang</a><sup>2</sup>,
-  <a href="https://github.com/qiuyu96" target="_blank">Qiuyu Wang</a><sup>2</sup>,
-  <a href="https://felixcheng97.github.io/" target="_blank">Ka Leong Cheng</a><sup>2</sup>,
-  <br>
-  <a href="#" target="_blank">Jiapeng Zhu</a><sup>2</sup>,
-  <a href="#" target="_blank">Hengyuan Cao</a><sup>1</sup>,
-  <a href="https://zhipengzhang.cn/" target="_blank">Zhipeng Zhang</a><sup>5</sup>,
-  <a href="https://openreview.net/profile?id=%7EXing_Zhu2" target="_blank">Xing Zhu</a><sup>2</sup>,
-  <a href="https://shenyujun.github.io/" target="_blank">Yujun Shen</a><sup>2</sup>,
-  <a href="#" target="_blank">Min Zhang</a><sup>1,3</sup>
-</div>
+<b>Candidate-based rewarded distribution matching for streaming video generation</b>
 
 <br>
 
-<div>
-  <sup>1</sup>ZJU, 
-  <sup>2</sup>Ant Group, 
-  <sup>3</sup>SIAS-ZJU, 
-  <sup>4</sup>HUST, 
-  <sup>5</sup>SJTU
-</div>
+<!-- TODO: 添加 Paper / Project Page / Models 徽章 -->
 
 </div>
-
-<br>
-
-[![Paper](https://img.shields.io/badge/Paper-arXiv-red)](https://arxiv.org/abs/2512.04678)
-[![Project Page](https://img.shields.io/badge/Project-Page-green)](https://reward-forcing.github.io/)
-[![Models](https://img.shields.io/badge/🤗-Models-yellow)](https://huggingface.co/JaydenLu666/Reward-Forcing-T2V-1.3B)
-
-</div>
-
-## 🚀 Progress
-
-- [x] 📝 Technical Report / Paper
-- [x] 🌐 Project Homepage
-- [x] 💻 Training & Inference Code
-- [x] 🤗 Pretrained Model: T2V-1.3B
-- [ ] 🔜 Pretrained Model: T2V-14B (In progress)
-
 
 ## 🎯 Overview
 
-<div align="center">
-  <img src="assets/teaser.png" width="800px">
-</div>
+> **TL;DR**: Gibbs Candidate Matching rolls out **multiple candidate samples** with the student model, scores every candidate with a reward model, **selects the top-1 candidate**, and applies **distribution matching distillation (DMD) on the selected candidate only**. The reward is used purely as a selection criterion — it never enters the gradient.
 
-> **TL;DR**: We propose Reward Forcing to distill a bidirectional video diffusion model into a 4-step autoregressive student model that enables real-time (23.1 FPS) streaming video generation. Instead of using vanilla distribution matching distillation (DMD), Reward Forcing adopts a novel rewarded distribution matching distillation (Re-DMD) that prioritizes matching towards high-reward regions, leading to enhanced object motion dynamics and immersive scene navigation dynamics in generated videos.
+```
+                      ┌─ candidate 1 ─┐
+condition blocks ────>├─ candidate 2 ─┤──> reward model ──> argmax ──> top-1
+     (no grad)        ├─ candidate 3 ─┤                                 │
+                      └─ candidate 4 ─┘                                 v
+                                                            distribution matching (DMD)
+```
 
+### Why this is different from advantage-weighted RL
 
+| | Gibbs Candidate Matching (this repo) | GRPO-style |
+|---|---|---|
+| Use of reward | **Selection only** (pick the winner) | Normalized into advantages, **weighted into the loss** |
+| Non-selected candidates | No loss term, no gradient | Contribute negative-advantage gradients |
+| Gradient path | Only the top-1 candidate | All samples in the group |
+
+Because the winner is unknown until the rewards are computed, **gradients are kept for all candidates during generation**; only the selected one actually contributes gradient in `backward()`. See [`GIBBS_CANDIDATE_MATCHING.md`](GIBBS_CANDIDATE_MATCHING.md) for the full gradient/memory analysis.
+
+### Relation to Self Forcing / Reward Forcing
+
+The codebase is built on top of [Self Forcing](https://github.com/guandeh17/Self-Forcing) and [Reward Forcing](https://github.com/JaydenLyh/Reward-Forcing) (autoregressive video diffusion distillation). The training objective here differs: instead of directly biasing distribution matching towards high-reward regions, Gibbs Candidate Matching first draws a set of candidates, picks the best one under the reward, and matches the distribution on that candidate.
 
 ## 📋 Table of Contents
 
@@ -66,11 +43,10 @@
 - [Pretrained Checkpoints](#-pretrained-checkpoints)
 - [Inference](#-inference)
 - [Training](#-training)
+- [Method Details](#-method-details)
 - [Results](#-results)
 - [Citation](#-citation)
 - [Acknowledgements](#-acknowledgements)
-- [Contact](#-contact)
-
 
 ## 🔧 Requirements
 
@@ -78,20 +54,21 @@
 - RAM: 64GB or more recommended.
 - Linux operating system.
 
+> Note: multi-candidate rollout holds the graphs of all candidates during the forward pass, so memory scales roughly linearly with the number of candidates. Reduce `num_rollouts` if you run out of memory.
+
 ## 🛠️ Installation
 
 ### Step 1: Clone the repository
 ```bash
-git clone https://github.com/JaydenLyh/Reward-Forcing.git
-cd Reward-Forcing
+git clone https://github.com/geezhi/Gibbs-Candidate-Matching.git
+cd Gibbs-Candidate-Matching
 ```
 
 ### Step 2: Create conda environment
 ```bash
-conda create -n reward_forcing python=3.10
-conda activate reward_forcing
+conda create -n gibbs_cm python=3.10
+conda activate gibbs_cm
 ```
-
 
 ### Step 3: Install dependencies
 ```bash
@@ -105,15 +82,16 @@ pip install -e .
 ```
 
 ## 📦 Pretrained Checkpoints
+
 ### Download Links
 
 | Model |  Download |
 |-------|----------|
-| VideoReward |  [Hugging Face](https://huggingface.co/KlingTeam/VideoReward) |
+| VideoReward (reward model) |  [Hugging Face](https://huggingface.co/KlingTeam/VideoReward) |
 | Wan2.1-T2V-1.3B |  [Hugging Face](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
 | Wan2.1-T2V-14B |  [Hugging Face](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B) |
 | ODE Initialization | [Hugging Face](https://huggingface.co/gdhe17/Self-Forcing/blob/main/checkpoints/ode_init.pt) |
-| Reward Forcing | [Hugging Face](https://huggingface.co/JaydenLu666/Reward-Forcing-T2V-1.3B) |
+| Reward Forcing (backbone init) | [Hugging Face](https://huggingface.co/JaydenLu666/Reward-Forcing-T2V-1.3B) |
 
 ### File Structure
 After downloading, organize the checkpoints as follows:
@@ -136,97 +114,94 @@ pip install "huggingface_hub[cli]"
 bash download_checkpoints.sh
 ```
 
-
 ## 🚀 Inference
 ### Quick Start
 ```bash
 # 5-seconds video inference
 python inference.py \
     --num_output_frames 21 \
-    --config_path configs/reward_forcing.yaml \
+    --config_path configs/gibbs_candidate_matching.yaml \
     --checkpoint_path checkpoints/Reward-Forcing-T2V-1.3B/rewardforcing.pt \
-    --output_folder videos/rewardforcing-5s \
+    --output_folder videos/gcm-5s \
     --data_path prompts/MovieGenVideoBench_extended.txt \
     --use_ema
 
 # 30-seconds video inference
 python inference.py \
     --num_output_frames 120 \
-    --config_path configs/reward_forcing.yaml \
+    --config_path configs/gibbs_candidate_matching.yaml \
     --checkpoint_path checkpoints/Reward-Forcing-T2V-1.3B/rewardforcing.pt \
-    --output_folder videos/rewardforcing-30s \
+    --output_folder videos/gcm-30s \
     --data_path prompts/MovieGenVideoBench_extended.txt \
     --use_ema
 ```
 
 ## 🏋️ Training
+
 ### Multi-GPU Training
 ```bash
-# bash train.sh
 torchrun --nnodes=1 --nproc_per_node=8 --rdzv_id=5235 --rdzv_backend=c10d  \
-    --rdzv_endpoint=$MASTER_PORT train.py  --config_path configs/reward_forcing.yaml \
-    --logdir logs/reward_forcing \
+    --rdzv_endpoint=$MASTER_PORT train.py  --config_path configs/gibbs_candidate_matching.yaml \
+    --logdir logs/gibbs_candidate_matching \
     --disable-wandb
 ```
 
 ### Multi-Node Training
 ```bash
 torchrun --nnodes=$NODE_SIZE --nproc_per_node=8 --node-rank=$NODE_RANK --rdzv_id=5235 --rdzv_backend=c10d  \
-    --rdzv_endpoint=$MASTER_IP:$MASTER_PORT train.py  --config_path configs/reward_forcing.yaml \
-    --logdir logs/reward_forcing \
+    --rdzv_endpoint=$MASTER_IP:$MASTER_PORT train.py  --config_path configs/gibbs_candidate_matching.yaml \
+    --logdir logs/gibbs_candidate_matching \
     --disable-wandb
 ```
 
 ### Configuration Files
 Training configurations are in `configs/`:
 - `default_config.yaml`: Default configuration
-- `reward_forcing.yaml`: Reward Forcing configuration
+- `gibbs_candidate_matching.yaml`: Training configuration, including the candidate-matching options:
 
+```yaml
+use_multi_rollout: True   # enable multi-candidate rollout + top-1 selection
+num_rollouts: 4           # number of candidate rollouts per prompt
+```
 
+Setting `use_multi_rollout: False` falls back to the single-rollout `generator_loss`.
+
+## 🔍 Method Details
+
+The candidate-matching logic lives in a single self-contained module:
+
+| File | Content |
+|---|---|
+| `model/best_of_n.py` | `BestOfNMixin` — rollout generation, reward scoring, top-1 selection, DMD assembly |
+| `model/re_dmd.py` | `ReDMD` model; provides the standard DMD loss |
+| `pipeline/reward_forcing_training.py` | `inference_with_trajectory_multi_rollout` — autoregressive multi-candidate generation |
+| `trainer/rewarded_distillation.py` | Training entry point |
+
+Full documentation of the method, its difference from GRPO, and the gradient/memory behaviour: **[`GIBBS_CANDIDATE_MATCHING.md`](GIBBS_CANDIDATE_MATCHING.md)**.
 
 ## 📊 Results
-### Quantitative Results
 
-#### Performance on VBench
+<!-- TODO: 填写我们方法的结果 -->
+
 | Method | Total Score | Quality Score | Semantic Score | Params | FPS |
 |--------|----------|----------|----------|--------|-----|
-| SkyReels-V2 | 82.67 | 84.70 | 74.53 | 1.3B | 0.49 |
-| MAGI-1 | 79.18 | 82.04 | 67.74 | 4.5B | 0.19 |
-| NOVA | 80.12 | 80.39 | 79.05 | 0.6B | 0.88 |
-| Pyramid Flow | 81.72 | 84.74 | 69.62 | 2B | 6.7 |
-| CausVid | 82.88 | 83.93 | 78.69 | 1.3B | 17.0 |
-| Self Forcing | 83.80 | 84.59 | 80.64 | 1.3B | 17.0 |
-| LongLive | 83.22 | 83.68 | **81.37** | 1.3B | 20.7 |
-| **Ours** | **84.13** | **84.84** | 81.32 | 1.3B | **23.1** |
-
-
-### Qualitative Results
-Visualizations can be found in our [Project Page](https://reward-forcing.github.io/).
-
-
-
+| Ours | — | — | — | 1.3B | — |
 
 ## 📄 Citation
-If you find this work useful, please consider citing:
+
+<!-- TODO: 填写论文信息 -->
 
 ```bibtex
-@article{lu2025reward,
-  title={Reward Forcing: Efficient Streaming Video Generation with Rewarded Distribution Matching Distillation},
-  author={Lu, Yunhong and Zeng, Yanhong and Li, Haobo and Ouyang, Hao and Wang, Qiuyu and Cheng, Ka Leong and Zhu, Jiapeng and Cao, Hengyuan and Zhang, Zhipeng and Zhu, Xing and others},
-  journal={arXiv preprint arXiv:2512.04678},
-  year={2025}
+@article{gibbs2026candidate,
+  title={Gibbs Candidate Matching},
+  author={TODO},
+  journal={TODO},
+  year={2026}
 }
 ```
 
-
 ## 🙏 Acknowledgements
-This project is built upon several excellent works: [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing), [Infinite Forcing](https://github.com/SOTAMak1r/Infinite-Forcing), [Wan2.1](https://github.com/Wan-Video/Wan2.1), [VideoAlign](https://github.com/KlingTeam/VideoAlign)
+
+This project is built upon several excellent works: [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing), [Reward Forcing](https://github.com/JaydenLyh/Reward-Forcing), [Wan2.1](https://github.com/Wan-Video/Wan2.1), [VideoAlign](https://github.com/KlingTeam/VideoAlign).
 
 We thank the authors for their great work and open-source contribution.
-
-
-## 📧 Contact
-For questions and discussions, please:
-- Open an issue on [GitHub Issues](https://github.com/JaydenLyh/Reward-Forcing/issues)
-- Contact us at: yunhonglu@zju.edu.cn
-
