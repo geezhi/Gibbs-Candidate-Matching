@@ -4,8 +4,9 @@ from typing import Optional, Tuple
 import torch
 
 from model.base import RewardForcingModel
+from model.best_of_n import BestOfNMixin
 
-class ReDMD(RewardForcingModel):
+class ReDMD(BestOfNMixin, RewardForcingModel):
     def __init__(self, args, device):
         """
         Initialize the Re-DMD (Rewarded Distribution Matching Distillation) module.
@@ -121,14 +122,11 @@ class ReDMD(RewardForcingModel):
     def compute_rewarded_distribution_matching_loss(
         self,
         image_or_video: torch.Tensor,
-        pixels: torch.Tensor,
-        text_prompts: list,
         conditional_dict: dict,
         unconditional_dict: dict,
         gradient_mask: Optional[torch.Tensor] = None,
         denoised_timestep_from: int = 0,
         denoised_timestep_to: int = 0,
-        beta: float = 1.0
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute the DMD loss (eq 7 in https://arxiv.org/abs/2311.18828).
@@ -144,14 +142,6 @@ class ReDMD(RewardForcingModel):
         original_latent = image_or_video
 
         batch_size, num_frame = image_or_video.shape[:2]
-
-        videos = 255.0 * pixels
-
-        reward = self.inferencer.reward_from_frames(
-            [videos[0]],
-            [text_prompts[0]],
-            use_norm=True,
-        ) 
 
         with torch.no_grad():
             min_timestep = denoised_timestep_to if self.ts_schedule and denoised_timestep_to is not None else self.min_score_timestep
@@ -187,10 +177,10 @@ class ReDMD(RewardForcingModel):
             )
 
         if gradient_mask is not None:
-            rl_dmd_loss = 0.5 * torch.exp(beta * reward['MQ']) * F.mse_loss(original_latent.double(
+            rl_dmd_loss = 0.5 * F.mse_loss(original_latent.double(
             )[gradient_mask], (original_latent.double() - grad.double()).detach()[gradient_mask], reduction="mean")
         else:
-            rl_dmd_loss = 0.5 * torch.exp(beta * reward['MQ']) * F.mse_loss(original_latent.double(
+            rl_dmd_loss = 0.5 * F.mse_loss(original_latent.double(
             ), (original_latent.double() - grad.double()).detach(), reduction="mean")
         return rl_dmd_loss, rl_dmd_log_dict
 
@@ -226,16 +216,13 @@ class ReDMD(RewardForcingModel):
         )
 
         # Step 2: Compute the DMD loss
-        rl_dmd_loss, rl_dmd_log_dict = self.compute_rewarded_distribution_matching_loss(   
+        rl_dmd_loss, rl_dmd_log_dict = self.compute_rewarded_distribution_matching_loss(
             image_or_video=pred_image,
-            pixels = pixels,
-            text_prompts=text_prompts,
             conditional_dict=conditional_dict,
             unconditional_dict=unconditional_dict,
             gradient_mask=gradient_mask,
             denoised_timestep_from=denoised_timestep_from,
             denoised_timestep_to=denoised_timestep_to,
-            beta = beta
         )
 
         return rl_dmd_loss, rl_dmd_log_dict
@@ -336,3 +323,4 @@ class ReDMD(RewardForcingModel):
         }
 
         return denoising_loss, critic_log_dict
+

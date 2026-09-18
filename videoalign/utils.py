@@ -183,40 +183,52 @@ def load_model_from_checkpoint(
     full_ckpt = os.path.join(checkpoint_path, "model.pth")
     lora_ckpt = os.path.join(checkpoint_path, "adapter_model.safetensors")
     non_lora_ckpt = os.path.join(checkpoint_path, "non_lora_state_dict.pth")
-    if os.path.exists(full_ckpt):
-        model_state_dict = torch.load(full_ckpt, map_location="cpu", weights_only=True)
-        # Create a new state_dict to store the modified key-value pairs
-        new_state_dict = {}
+    def _remap_keys_if_needed(state_dict, model):
+        """
+        Check if the checkpoint keys need remapping to match the current model structure.
+        Old format: base_model.model.visual.* / base_model.model.model.*
+        New format: base_model.model.visual.* (no remapping needed)
+        Only remap if the model expects keys that don't exist in the checkpoint.
+        """
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = set(state_dict.keys())
 
-        # for key, value in model_state_dict.items():
-        #     if key.startswith("base_model.model.model"):
-        #         new_key = "base_model.model.model.language_model" + key[len("base_model.model.model"):]
-        #         new_state_dict[new_key] = value
-        #     elif key.startswith("base_model.model.visual"):
-        #         new_key = "base_model.model.model.visual" + key[len("base_model.model.visual"):]
-        #         new_state_dict[new_key] = value
-        #     else:
-        #         new_state_dict[key] = value
-        for key, value in model_state_dict.items():
-            if key.startswith("base_model.model.model"):
+        # Check if checkpoint has old-style keys that need remapping
+        # Old style: base_model.model.model.layers.* (language model without language_model prefix)
+        # and model expects base_model.model.model.language_model.*
+        needs_remap = (
+            any(k.startswith("base_model.model.model.layers") for k in ckpt_keys) and
+            any(k.startswith("base_model.model.model.language_model") for k in model_keys)
+        )
+
+        if not needs_remap:
+            return state_dict
+
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith("base_model.model.model") and not key.startswith("base_model.model.model.language_model"):
                 new_key = "base_model.model.model.language_model" + key[len("base_model.model.model"):]
                 new_state_dict[new_key] = value
-            elif key.startswith("base_model.model.visual"):
+            elif key.startswith("base_model.model.visual") and not key.startswith("base_model.model.model.visual"):
                 new_key = "base_model.model.model.visual" + key[len("base_model.model.visual"):]
                 new_state_dict[new_key] = value
             else:
                 new_state_dict[key] = value
+        return new_state_dict
 
-        # Load the modified state_dict into the model
+    if os.path.exists(full_ckpt):
+        model_state_dict = torch.load(full_ckpt, map_location="cpu", weights_only=True)
+        new_state_dict = _remap_keys_if_needed(model_state_dict, model)
         model.load_state_dict(new_state_dict)
-        # model_state_dict = torch.load(full_ckpt, map_location="cpu")
-        # model.load_state_dict(model_state_dict)
     else:
         lora_state_dict = safetensors.torch.load_file(lora_ckpt)
         non_lora_state_dict = torch.load(non_lora_ckpt, map_location="cpu")
 
         lora_state_dict = _insert_adapter_name_into_state_dict(lora_state_dict, adapter_name="default", parameter_prefix="lora_")
-        
+
+        lora_state_dict = _remap_keys_if_needed(lora_state_dict, model)
+        non_lora_state_dict = _remap_keys_if_needed(non_lora_state_dict, model)
+
         model_state_dict = model.state_dict()
         model_state_dict.update(non_lora_state_dict)
         model_state_dict.update(lora_state_dict)

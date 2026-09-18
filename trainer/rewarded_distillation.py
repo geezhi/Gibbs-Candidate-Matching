@@ -41,7 +41,6 @@ class Trainer:
         self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
         
         if self.gradient_accumulation_steps > 1:
-            self.config.log_iters = self.config.log_iters * self.gradient_accumulation_steps
             print(f"INFO: Using gradient accumulation with {self.gradient_accumulation_steps} steps. log_iters = {self.config.log_iters}")
 
 
@@ -251,20 +250,30 @@ class Trainer:
 
         # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:
-            generator_loss, generator_log_dict = self.model.generator_loss(
-                image_or_video_shape=image_or_video_shape,
-                conditional_dict=conditional_dict,
-                unconditional_dict=unconditional_dict,
-                text_prompts = text_prompts,
-                clean_latent=clean_latent,
-                initial_latent=image_latent if self.config.i2v else None,
-                beta = self.config.beta
-            )
+            use_multi_rollout = getattr(self.config, "use_multi_rollout", False)
+            if use_multi_rollout:
+                generator_loss, generator_log_dict = self.model.generator_loss_best_of_n(
+                    image_or_video_shape=image_or_video_shape,
+                    conditional_dict=conditional_dict,
+                    unconditional_dict=unconditional_dict,
+                    text_prompts=text_prompts,
+                    clean_latent=clean_latent,
+                    initial_latent=image_latent if self.config.i2v else None,
+                    num_rollouts=getattr(self.config, "num_rollouts", 4),
+                )
+            else:
+                generator_loss, generator_log_dict = self.model.generator_loss(
+                    image_or_video_shape=image_or_video_shape,
+                    conditional_dict=conditional_dict,
+                    unconditional_dict=unconditional_dict,
+                    text_prompts=text_prompts,
+                    clean_latent=clean_latent,
+                    initial_latent=image_latent if self.config.i2v else None,
+                    beta=self.config.beta
+                )
 
-            if self.gradient_accumulation_steps > 1:
-                generator_loss = generator_loss / self.gradient_accumulation_steps
-            
-            generator_loss.backward()
+            scaled_generator_loss = generator_loss / self.gradient_accumulation_steps
+            scaled_generator_loss.backward()
             generator_grad_norm = self.model.generator.clip_grad_norm_(
                 self.max_grad_norm_generator)
 
@@ -283,10 +292,8 @@ class Trainer:
             clean_latent=clean_latent,
             initial_latent=image_latent if self.config.i2v else None
         )
-        if self.gradient_accumulation_steps > 1:
-            critic_loss = critic_loss / self.gradient_accumulation_steps
-
-        critic_loss.backward()
+        scaled_critic_loss = critic_loss / self.gradient_accumulation_steps
+        scaled_critic_loss.backward()
         critic_grad_norm = self.model.fake_score.clip_grad_norm_(
             self.max_grad_norm_critic)
 
@@ -329,42 +336,30 @@ class Trainer:
         start_step = self.step
 
         while self.step < self.config.full_training_steps:
-            # TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
-            TRAIN_GENERATOR = self.step % (self.config.dfake_gen_update_ratio * self.gradient_accumulation_steps) == 0
+            TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
 
             # Train the generator
             if TRAIN_GENERATOR:
-                # self.generator_optimizer.zero_grad(set_to_none=True)
+                self.generator_optimizer.zero_grad(set_to_none=True)
                 extras_list = []
-                batch = next(self.dataloader)
-                extra = self.fwdbwd_one_step(batch, True)
-                extras_list.append(extra)
+                for _ in range(self.gradient_accumulation_steps):
+                    batch = next(self.dataloader)
+                    extra = self.fwdbwd_one_step(batch, True)
+                    extras_list.append(extra)
                 generator_log_dict = merge_dict_list(extras_list)
                 self.generator_optimizer.step()
                 if self.generator_ema is not None:
                     self.generator_ema.update(self.model.generator)
 
             # Train the critic
-            # self.critic_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
             extras_list = []
-            batch = next(self.dataloader)
-            extra = self.fwdbwd_one_step(batch, False)
-            extras_list.append(extra)
+            for _ in range(self.gradient_accumulation_steps):
+                batch = next(self.dataloader)
+                extra = self.fwdbwd_one_step(batch, False)
+                extras_list.append(extra)
             critic_log_dict = merge_dict_list(extras_list)
             self.critic_optimizer.step()
-
-            # MODIFIED: Perform optimizer step and zero grad only after N accumulation steps
-            if self.step % self.gradient_accumulation_steps == 0:
-                # Step and clear grads for Generator
-                if TRAIN_GENERATOR:
-                    self.generator_optimizer.step()
-                    if self.generator_ema is not None:
-                        self.generator_ema.update(self.model.generator)
-                    self.generator_optimizer.zero_grad(set_to_none=True)
-
-                # Step and clear grads for Critic
-                self.critic_optimizer.step()
-                self.critic_optimizer.zero_grad(set_to_none=True)
 
             # Increment the step since we finished gradient update
             self.step += 1
@@ -398,6 +393,15 @@ class Trainer:
                         "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item()
                     }
                 )
+
+                # Print loss to stdout every step
+                log_parts = [f"step={self.step}"]
+                if TRAIN_GENERATOR:
+                    log_parts.append(f"gen_loss={wandb_loss_dict['generator_loss']:.4f}")
+                    log_parts.append(f"gen_grad_norm={wandb_loss_dict['generator_grad_norm']:.4f}")
+                log_parts.append(f"critic_loss={wandb_loss_dict['critic_loss']:.4f}")
+                log_parts.append(f"critic_grad_norm={wandb_loss_dict['critic_grad_norm']:.4f}")
+                print("  ".join(log_parts), flush=True)
 
                 if not self.disable_wandb:
                     wandb.log(wandb_loss_dict, step=self.step)

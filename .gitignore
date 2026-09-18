@@ -1,0 +1,31 @@
+# ---- Model weights / checkpoints ----
+checkpoints/*
+!checkpoints/Put all checkpoints here.txt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.ckpt
+*.onnx
+
+# ---- Large data & experiment outputs ----
+prompts/vidprom_filtered_extended.txt
+results/
+sf_vlm_memory_exp/
+videos/
+outputs/
+*.mp4
+*.avi
+*.mov
+
+# ---- Cache & build artifacts ----
+.cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+
+# ---- Misc ----
+截图*.png

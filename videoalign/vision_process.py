@@ -312,7 +312,10 @@ def process_wanvideo_tensor(
             antialias=True,
         ).float()
     
-    return video.float()
+    # Clamp to [0, 1] to eliminate floating-point errors (e.g. tiny negatives from BICUBIC interpolation)
+    video = video.clamp(0.0, 1.0)
+    
+    return video
 
 
 

@@ -28,21 +28,46 @@ from transformers.trainer import (
     TRAINER_STATE_NAME,
     PREFIX_CHECKPOINT_DIR,
     logger,
-    speed_metrics,
-    deepspeed_init,
+)
+from transformers.trainer_utils import (
+    EvalPrediction,
+    EvalLoopOutput,
+    PredictionOutput,
+    denumpify_detensorize,
     speed_metrics,
     has_length,
-    EvalPrediction,
-    EvalLoopContainer,
-    PredictionOutput,
-    is_torch_xla_available,
-    denumpify_detensorize,
-    PredictionOutput,
-    EvalLoopOutput,
-    DistributedTensorGatherer,
-    SequentialDistributedSampler,
-    nested_concat,
 )
+try:
+    from transformers.trainer import is_torch_xla_available
+except ImportError:
+    try:
+        from transformers.utils import is_torch_xla_available
+    except ImportError:
+        def is_torch_xla_available():
+            return False
+try:
+    from transformers.trainer import deepspeed_init
+except ImportError:
+    try:
+        from transformers.integrations import deepspeed_init
+    except ImportError:
+        deepspeed_init = None
+try:
+    from transformers.trainer import EvalLoopContainer
+except ImportError:
+    EvalLoopContainer = None
+try:
+    from transformers.trainer_pt_utils import DistributedTensorGatherer
+except ImportError:
+    DistributedTensorGatherer = None
+try:
+    from transformers.trainer_pt_utils import SequentialDistributedSampler
+except ImportError:
+    SequentialDistributedSampler = None
+try:
+    from transformers.trainer_pt_utils import nested_concat
+except ImportError:
+    nested_concat = None
 from transformers.trainer_callback import TrainerControl, TrainerState
 
 from transformers.trainer_pt_utils import nested_detach, find_batch_size
@@ -50,18 +75,20 @@ from transformers.training_args import TrainingArguments
 from trl import RewardTrainer
 from videoalign.utils import get_peft_state_non_lora_maybe_zero_3
 
-
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
 else:
     IS_XLA_FSDPV2_POST_2_2 = False
 
 class Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
-    def __init__(self, config, output_dim=4, reward_token="last", special_token_ids=None):
-        super().__init__(config)
+    def __init__(self, config, output_dim=4, reward_token="last", special_token_ids=None, **kwargs):
+        use_cache = kwargs.pop("use_cache", None)
+        super().__init__(config, **kwargs)
+        if use_cache is not None:
+            self.config.use_cache = use_cache
         # pdb.set_trace()
         self.output_dim = output_dim
-        self.rm_head = nn.Linear(config.hidden_size, output_dim, bias=False)
+        self.rm_head = nn.Linear(config.get_text_config().hidden_size, output_dim, bias=False)
         self.reward_token = reward_token
 
         self.special_token_ids = special_token_ids
@@ -85,47 +112,27 @@ class Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         rope_deltas: Optional[torch.LongTensor] = None,
+        **kwargs,
     ):
-        ## modified from the origin class Qwen2VLForConditionalGeneration
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # pdb.set_trace()
-        if inputs_embeds is None:
-            #inputs_embeds = self.model.embed_tokens(input_ids)
-            inputs_embeds = self.get_input_embeddings()(input_ids)
-            if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.get_dtype())
-                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-                image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-
-            if pixel_values_videos is not None:
-                pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
-                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
-                video_mask = (input_ids == self.config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(inputs_embeds.device)
-
-        outputs = self.model(
-            input_ids=None,
-            position_ids=position_ids,
+        ## Delegate visual processing to parent class, then apply reward head
+        parent_outputs = super().forward(
+            input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_hidden_states=True,
+            return_dict=True,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            rope_deltas=rope_deltas,
         )
-        
-        hidden_states = outputs[0]  # [B, L, D]
+
+        hidden_states = parent_outputs.hidden_states[-1]  # [B, L, D]
 
         logits = self.rm_head(hidden_states)    # [B, L, N]
         

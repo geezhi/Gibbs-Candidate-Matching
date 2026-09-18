@@ -69,8 +69,56 @@ else:
 
 if args.checkpoint_path:
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
-    state_dict = state_dict
-    pipeline.generator.load_state_dict(state_dict)
+    # Checkpoint saved during training contains top-level keys: generator, critic, generator_ema
+    if "generator_ema" in state_dict and args.use_ema:
+        ema_sd = state_dict["generator_ema"]
+
+        # Remove FSDP wrapper prefix if present
+        new_ema_sd = {}
+        for key, value in ema_sd.items():
+            # Remove '_fsdp_wrapped_module.' prefix if it exists
+            if key.startswith('model._fsdp_wrapped_module.'):
+                new_key = key.replace('model._fsdp_wrapped_module.', 'model.')
+                new_ema_sd[new_key] = value
+            else:
+                new_ema_sd[key] = value
+
+        model_sd = pipeline.generator.state_dict()
+        ema_keys = set(new_ema_sd.keys())
+        model_keys = set(model_sd.keys())
+        matched = ema_keys & model_keys
+        missing = model_keys - ema_keys
+        unexpected = ema_keys - model_keys
+        if local_rank == 0:
+            print(f"[EMA load] matched={len(matched)}, missing={len(missing)}, unexpected={len(unexpected)}")
+            if len(missing) > 0:
+                print(f"  Missing keys (first 5): {list(missing)[:5]}")
+            if len(unexpected) > 0:
+                print(f"  Unexpected keys (first 5): {list(unexpected)[:5]}")
+        pipeline.generator.load_state_dict(new_ema_sd, strict=False)
+    elif "generator" in state_dict:
+        state_dict = state_dict["generator"]
+        # Remove FSDP wrapper prefix if present
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            # Remove '_fsdp_wrapped_module.' prefix if it exists
+            if key.startswith('model._fsdp_wrapped_module.'):
+                new_key = key.replace('model._fsdp_wrapped_module.', 'model.')
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+        pipeline.generator.load_state_dict(new_state_dict)
+    else:
+        # Remove FSDP wrapper prefix if present
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            # Remove '_fsdp_wrapped_module.' prefix if it exists
+            if key.startswith('model._fsdp_wrapped_module.'):
+                new_key = key.replace('model._fsdp_wrapped_module.', 'model.')
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+        pipeline.generator.load_state_dict(new_state_dict)
     checkpoint_step = os.path.basename(os.path.dirname(args.checkpoint_path))
     checkpoint_step = checkpoint_step.split('_')[-1]
 
@@ -191,7 +239,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         model = "regular" if not args.use_ema else "ema"
         # for seed_idx in range(args.num_samples):
         if args.num_samples == 1:  # must true
-            output_path = os.path.join(args.output_folder, f'{prompt[:50]}.mp4')
+            output_path = os.path.join(args.output_folder, f'{prompt[:50]}-{args.seed}.mp4')
             write_video(output_path, video[0], fps=16)
 
 if dist.is_initialized():

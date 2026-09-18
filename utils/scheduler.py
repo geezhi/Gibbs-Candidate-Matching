@@ -188,6 +188,7 @@ class FlowMatchScheduler():
         if timestep.ndim == 2:
             timestep = timestep.flatten(0, 1)
         self.linear_timesteps_weights = self.linear_timesteps_weights.to(timestep.device)
+        self.timesteps = self.timesteps.to(timestep.device)
         timestep_id = torch.argmin(
             (self.timesteps.unsqueeze(1) - timestep.unsqueeze(0)).abs(), dim=0)
         weights = self.linear_timesteps_weights[timestep_id]

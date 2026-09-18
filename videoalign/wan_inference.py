@@ -147,6 +147,16 @@ class VideoVLMRewardInference():
 
         processed_videos = []
         for tensor in video_tensors:
+            # Sample frames to match num_frames expected by the processor
+            T = tensor.shape[0]
+            if num_frames is not None and T != num_frames:
+                idx = torch.linspace(0, T - 1, num_frames).round().long()
+                tensor = tensor[idx]
+            elif num_frames is None and T % 2 != 0:
+                # Qwen2-VL requires frame count to be divisible by FRAME_FACTOR=2
+                new_T = T - 1
+                idx = torch.linspace(0, T - 1, new_T).round().long()
+                tensor = tensor[idx]
             processed = process_wanvideo_tensor(tensor)
             processed_videos.append(processed)
         video_tensors = processed_videos  
@@ -156,7 +166,7 @@ class VideoVLMRewardInference():
             videos=video_tensors,  
             padding=True,
             return_tensors="pt",
-            videos_kwargs={"do_rescale": True},  
+            videos_kwargs={"do_rescale": False},  # Already normalized to [0, 1] in process_wanvideo_tensor
         )
 
         return self._prepare_inputs(batch)

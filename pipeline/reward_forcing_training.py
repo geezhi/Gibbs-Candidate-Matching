@@ -266,3 +266,278 @@ class RewardForcingTrainingPipeline:
                 "is_init": False
             })
         self.crossattn_cache = crossattn_cache
+
+    def _clone_kv_cache(self):
+        """Deep-clone the current KV cache state for later restoration."""
+        cloned = []
+        for entry in self.kv_cache1:
+            cloned.append({
+                "k": entry["k"].clone(),
+                "v": entry["v"].clone(),
+                "global_end_index": entry["global_end_index"].clone(),
+                "local_end_index": entry["local_end_index"].clone(),
+            })
+        return cloned
+
+    def _clone_crossattn_cache(self):
+        """Deep-clone the current cross-attention cache state for later restoration."""
+        cloned = []
+        for entry in self.crossattn_cache:
+            cloned.append({
+                "k": entry["k"].clone(),
+                "v": entry["v"].clone(),
+                "is_init": entry["is_init"],
+            })
+        return cloned
+
+    def _restore_kv_cache(self, saved_cache):
+        """Restore KV cache from a previously saved clone."""
+        for i, entry in enumerate(saved_cache):
+            self.kv_cache1[i]["k"].copy_(entry["k"])
+            self.kv_cache1[i]["v"].copy_(entry["v"])
+            self.kv_cache1[i]["global_end_index"].copy_(entry["global_end_index"])
+            self.kv_cache1[i]["local_end_index"].copy_(entry["local_end_index"])
+
+    def _restore_crossattn_cache(self, saved_cache):
+        """Restore cross-attention cache from a previously saved clone."""
+        for i, entry in enumerate(saved_cache):
+            self.crossattn_cache[i]["k"].copy_(entry["k"])
+            self.crossattn_cache[i]["v"].copy_(entry["v"])
+            self.crossattn_cache[i]["is_init"] = entry["is_init"]
+
+    def inference_with_trajectory_multi_rollout(
+            self,
+            noise,
+            num_rollouts: int = 4,
+            initial_latent=None,
+            **conditional_dict
+    ):
+        """
+        Multi-rollout variant: generate the condition blocks (no grad), then roll out
+        `num_rollouts` different last-21-frame segments, each starting from freshly sampled
+        noise while sharing the same condition (the KV cache is restored before each rollout).
+
+        Every rollout keeps its graph alive at the exit step. This is deliberate: the
+        best-of-N winner is decided by the rewards, and the rewards only exist after all
+        rollouts have been generated, so the winner cannot be known in advance.
+
+        Returns:
+            condition_output: condition frames (no grad)
+            rollout_outputs: list of num_rollouts tensors, each [B, 21, C, H, W]
+            denoised_timestep_from, denoised_timestep_to: timestep range for DMD loss
+            exit_step: the exit denoising step index
+            condition_start_frame_abs: frame index where the last 21 frames start
+        """
+        import torch
+        batch_size, num_frames, num_channels, height, width = noise.shape
+        if not self.independent_first_frame or (self.independent_first_frame and initial_latent is not None):
+            assert num_frames % self.num_frame_per_block == 0
+            num_blocks = num_frames // self.num_frame_per_block
+        else:
+            assert (num_frames - 1) % self.num_frame_per_block == 0
+            num_blocks = (num_frames - 1) // self.num_frame_per_block
+
+        num_input_frames = initial_latent.shape[1] if initial_latent is not None else 0
+        num_output_frames = num_frames + num_input_frames
+
+        # Step 1: Initialize KV cache
+        self._initialize_kv_cache(batch_size=batch_size, dtype=noise.dtype, device=noise.device)
+        self._initialize_crossattn_cache(batch_size=batch_size, dtype=noise.dtype, device=noise.device)
+
+        # Step 2: Cache initial latent (i2v)
+        current_start_frame = 0
+        condition_output = torch.zeros(
+            [batch_size, num_output_frames, num_channels, height, width],
+            device=noise.device, dtype=noise.dtype
+        )
+        if initial_latent is not None:
+            timestep = torch.ones([batch_size, 1], device=noise.device, dtype=torch.int64) * 0
+            condition_output[:, :1] = initial_latent
+            with torch.no_grad():
+                self.generator(
+                    noisy_image_or_video=initial_latent,
+                    conditional_dict=conditional_dict,
+                    timestep=timestep * 0,
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start_frame * self.frame_seq_length
+                )
+            current_start_frame += 1
+
+        # Step 3: Determine block layout and exit flags
+        all_num_frames = [self.num_frame_per_block] * num_blocks
+        if self.independent_first_frame and initial_latent is None:
+            all_num_frames = [1] + all_num_frames
+        num_denoising_steps = len(self.denoising_step_list)
+        exit_flags = self.generate_and_sync_list(len(all_num_frames), num_denoising_steps, device=noise.device)
+
+        # The last 21 frames correspond to the last (21 // num_frame_per_block) blocks
+        last_21_blocks = 21 // self.num_frame_per_block
+        condition_blocks = len(all_num_frames) - last_21_blocks
+        condition_start_frame_abs = num_input_frames + sum(all_num_frames[:condition_blocks])
+
+        # Step 4: Generate condition blocks (no grad, update KV cache)
+        for block_index in range(condition_blocks):
+            current_num_frames = all_num_frames[block_index]
+            noisy_input = noise[
+                :, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
+
+            for index, current_timestep in enumerate(self.denoising_step_list):
+                if self.same_step_across_blocks:
+                    exit_flag = (index == exit_flags[0])
+                else:
+                    exit_flag = (index == exit_flags[block_index])
+                timestep = torch.ones(
+                    [batch_size, current_num_frames], device=noise.device, dtype=torch.int64) * current_timestep
+
+                with torch.no_grad():
+                    _, denoised_pred = self.generator(
+                        noisy_image_or_video=noisy_input,
+                        conditional_dict=conditional_dict,
+                        timestep=timestep,
+                        kv_cache=self.kv_cache1,
+                        crossattn_cache=self.crossattn_cache,
+                        current_start=current_start_frame * self.frame_seq_length
+                    )
+                    if not exit_flag:
+                        next_timestep = self.denoising_step_list[index + 1]
+                        noisy_input = self.scheduler.add_noise(
+                            denoised_pred.flatten(0, 1),
+                            torch.randn_like(denoised_pred.flatten(0, 1)),
+                            next_timestep * torch.ones(
+                                [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+                        ).unflatten(0, denoised_pred.shape[:2])
+                    else:
+                        break
+
+            condition_output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
+
+            # Update KV cache with denoised output
+            context_timestep = torch.ones_like(timestep) * self.context_noise
+            denoised_pred_ctx = self.scheduler.add_noise(
+                denoised_pred.flatten(0, 1),
+                torch.randn_like(denoised_pred.flatten(0, 1)),
+                context_timestep * torch.ones(
+                    [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+            ).unflatten(0, denoised_pred.shape[:2])
+            with torch.no_grad():
+                self.generator(
+                    noisy_image_or_video=denoised_pred_ctx,
+                    conditional_dict=conditional_dict,
+                    timestep=context_timestep,
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start_frame * self.frame_seq_length
+                )
+            current_start_frame += current_num_frames
+
+        # Step 5: Save KV cache state after condition blocks
+        saved_kv_cache = self._clone_kv_cache()
+        saved_crossattn_cache = self._clone_crossattn_cache()
+        saved_start_frame = current_start_frame
+
+        # Compute denoised timestep info
+        last_block_exit = exit_flags[condition_blocks] if not self.same_step_across_blocks else exit_flags[0]
+        if last_block_exit == len(self.denoising_step_list) - 1:
+            denoised_timestep_to = 0
+            denoised_timestep_from = 1000 - torch.argmin(
+                (self.scheduler.timesteps.cuda() - self.denoising_step_list[last_block_exit].cuda()).abs(), dim=0).item()
+        else:
+            denoised_timestep_to = 1000 - torch.argmin(
+                (self.scheduler.timesteps.cuda() - self.denoising_step_list[last_block_exit + 1].cuda()).abs(), dim=0).item()
+            denoised_timestep_from = 1000 - torch.argmin(
+                (self.scheduler.timesteps.cuda() - self.denoising_step_list[last_block_exit].cuda()).abs(), dim=0).item()
+
+        # Step 6: Generate num_rollouts different last-21-frame segments
+        rollout_outputs = []
+        for sample_idx in range(num_rollouts):
+            # Restore KV cache to condition state
+            self._restore_kv_cache(saved_kv_cache)
+            self._restore_crossattn_cache(saved_crossattn_cache)
+            current_start_frame = saved_start_frame
+
+            # Sample new noise for the last 21 frames
+            sample_noise = torch.randn(
+                [batch_size, 21, num_channels, height, width], device=noise.device, dtype=noise.dtype)
+
+            sample_output = torch.zeros(
+                [batch_size, 21, num_channels, height, width],
+                device=noise.device, dtype=noise.dtype
+            )
+            local_start = 0
+
+            for block_index in range(condition_blocks, len(all_num_frames)):
+                current_num_frames = all_num_frames[block_index]
+                noisy_input = sample_noise[:, local_start:local_start + current_num_frames]
+
+                for index, current_timestep in enumerate(self.denoising_step_list):
+                    if self.same_step_across_blocks:
+                        exit_flag = (index == exit_flags[0])
+                    else:
+                        exit_flag = (index == exit_flags[block_index])
+                    timestep = torch.ones(
+                        [batch_size, current_num_frames], device=noise.device, dtype=torch.int64) * current_timestep
+
+                    if not exit_flag:
+                        with torch.no_grad():
+                            _, denoised_pred = self.generator(
+                                noisy_image_or_video=noisy_input,
+                                conditional_dict=conditional_dict,
+                                timestep=timestep,
+                                kv_cache=self.kv_cache1,
+                                crossattn_cache=self.crossattn_cache,
+                                current_start=current_start_frame * self.frame_seq_length
+                            )
+                            next_timestep = self.denoising_step_list[index + 1]
+                            noisy_input = self.scheduler.add_noise(
+                                denoised_pred.flatten(0, 1),
+                                torch.randn_like(denoised_pred.flatten(0, 1)),
+                                next_timestep * torch.ones(
+                                    [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+                            ).unflatten(0, denoised_pred.shape[:2])
+                    else:
+                        # Enable grad for all samples: we don't know which one has the highest reward
+                        _, denoised_pred = self.generator(
+                            noisy_image_or_video=noisy_input,
+                            conditional_dict=conditional_dict,
+                            timestep=timestep,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length
+                        )
+                        break
+
+                sample_output[:, local_start:local_start + current_num_frames] = denoised_pred
+
+                # Update KV cache for subsequent blocks within this sample
+                if block_index < len(all_num_frames) - 1:
+                    context_timestep = torch.ones_like(timestep) * self.context_noise
+                    denoised_pred_ctx = self.scheduler.add_noise(
+                        denoised_pred.flatten(0, 1),
+                        torch.randn_like(denoised_pred.flatten(0, 1)),
+                        context_timestep * torch.ones(
+                            [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+                    ).unflatten(0, denoised_pred.shape[:2])
+                    with torch.no_grad():
+                        self.generator(
+                            noisy_image_or_video=denoised_pred_ctx,
+                            conditional_dict=conditional_dict,
+                            timestep=context_timestep,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length
+                        )
+
+                current_start_frame += current_num_frames
+                local_start += current_num_frames
+
+            rollout_outputs.append(sample_output)
+
+        return (
+            condition_output[:, :condition_start_frame_abs],
+            rollout_outputs,
+            denoised_timestep_from,
+            denoised_timestep_to,
+            last_block_exit + 1,
+            condition_start_frame_abs,
+        )
