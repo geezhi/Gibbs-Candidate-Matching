@@ -1,5 +1,5 @@
-generator_ckpt: /efs/zixianhuang/checkpoints/checkpoints/ode_init.pt
-wan_model_base_path: /efs/zixianhuang/checkpoints/wan_models
+generator_ckpt: checkpoints/ode_init.pt
+wan_model_base_path: checkpoints
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
@@ -59,4 +59,4 @@ model_kwargs:
   timestep_shift: 5.0
   local_attn_size: 9
   sink_size: 3
-checkpoint_path: /efs/zixianhuang/checkpoints
+checkpoint_path: checkpoints
